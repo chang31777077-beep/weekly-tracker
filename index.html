@@ -7,6 +7,26 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+  <!-- Firebase -->
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.11.0/firebase-app.js";
+    import { getDatabase, ref, set, onValue } from "https://www.gstatic.com/firebasejs/10.11.0/firebase-database.js";
+
+    const firebaseConfig = {
+      apiKey: "AIzaSyAPWPQiSb2pmBxNgWS4PkZ1AIzUcAf8PZU",
+      authDomain: "planning-with-ai-39bb5.firebaseapp.com",
+      databaseURL: "https://planning-with-ai-39bb5-default-rtdb.firebaseio.com",
+      projectId: "planning-with-ai-39bb5",
+      storageBucket: "planning-with-ai-39bb5.firebasestorage.app",
+      messagingSenderId: "911234483533",
+      appId: "1:911234483533:web:70d6aea94d440937536304"
+    };
+
+    const app = initializeApp(firebaseConfig);
+    const db  = getDatabase(app);
+
+    window.__firebase = { db, ref, set, onValue };
+  </script>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { background: #F8FAFC; font-family: -apple-system, 'Helvetica Neue', Arial, sans-serif; }
@@ -16,13 +36,13 @@
   <div id="root"></div>
 
   <script type="text/babel">
-    const { useState, useEffect } = React;
+    const { useState, useEffect, useRef } = React;
 
+    // ── 日期工具 ─────────────────────────────────────────
     function getMondayDate(date) {
       const d = new Date(date);
       const day = d.getDay();
-      const diff = day === 0 ? -6 : 1 - day;
-      d.setDate(d.getDate() + diff);
+      d.setDate(d.getDate() + (day === 0 ? -6 : 1 - day));
       d.setHours(0, 0, 0, 0);
       return d;
     }
@@ -33,6 +53,7 @@
     function getMondayOfWeek(key){ const [y,m,d]=key.split("-").map(Number); return new Date(y,m-1,d); }
     function currentWeekKey()    { return getWeekKey(new Date()); }
 
+    // ── 常數 ─────────────────────────────────────────────
     const FIXED_TASKS = [
       { id:"engmath",     text:"工程數學 45分鐘",   tag:"必做" },
       { id:"anki_make",   text:"Anki 製卡（電腦）", tag:"必做" },
@@ -61,35 +82,60 @@
       if (dayKey === "sun") tasks.push({ ...SUNDAY_EXTRA, done:false });
       return { tasks, note:"", subject:"" };
     }
+    function createDefaultWeek() {
+      const d = {};
+      DAYS.forEach(day => { d[day.key] = createDefaultDay(day.key); });
+      return d;
+    }
 
+    // ── 主元件 ───────────────────────────────────────────
     function StudyTracker() {
       const [weekKey,     setWeekKey]     = useState(currentWeekKey);
       const [weekData,    setWeekData]    = useState(null);
-      const [loading,     setLoading]     = useState(true);
+      const [syncing,     setSyncing]     = useState(true);
+      const [syncStatus,  setSyncStatus]  = useState("連線中...");
       const [addingTo,    setAddingTo]    = useState(null);
       const [newText,     setNewText]     = useState({});
       const [expandedDay, setExpandedDay] = useState(null);
+      const saveTimer   = useRef(null);
+      const isRemote    = useRef(false);
 
+      // Firebase 監聽
       useEffect(() => {
-        let cancelled = false;
-        setLoading(true);
-        try {
-          const raw = localStorage.getItem(`study_${weekKey}`);
-          if (!cancelled) {
-            if (raw) { setWeekData(JSON.parse(raw)); }
-            else { const d={}; DAYS.forEach(day=>{ d[day.key]=createDefaultDay(day.key); }); setWeekData(d); }
-          }
-        } catch {
-          if (!cancelled) { const d={}; DAYS.forEach(day=>{ d[day.key]=createDefaultDay(day.key); }); setWeekData(d); }
-        }
-        setLoading(false);
-        return () => { cancelled = true; };
+        const fb = window.__firebase;
+        if (!fb) { setSyncStatus("離線模式"); setSyncing(false); setWeekData(createDefaultWeek()); return; }
+        setSyncing(true);
+        setSyncStatus("連線中...");
+        const dbRef = fb.ref(fb.db, `weeklyTracker/${weekKey}`);
+        const unsub = fb.onValue(dbRef, (snapshot) => {
+          isRemote.current = true;
+          const val = snapshot.val();
+          setWeekData(val ? val : createDefaultWeek());
+          setSyncing(false);
+          setSyncStatus("已同步 ✓");
+          setTimeout(() => setSyncStatus(""), 2000);
+        }, () => {
+          setSyncing(false);
+          setSyncStatus("連線失敗");
+          setWeekData(prev => prev || createDefaultWeek());
+        });
+        return () => unsub();
       }, [weekKey]);
 
+      // 儲存到 Firebase（防抖 1.5 秒）
       useEffect(() => {
-        if (!weekData || loading) return;
-        try { localStorage.setItem(`study_${weekKey}`, JSON.stringify(weekData)); } catch {}
-      }, [weekData, weekKey, loading]);
+        if (!weekData || syncing) return;
+        if (isRemote.current) { isRemote.current = false; return; }
+        clearTimeout(saveTimer.current);
+        setSyncStatus("儲存中...");
+        saveTimer.current = setTimeout(() => {
+          const fb = window.__firebase;
+          if (!fb) return;
+          fb.set(fb.ref(fb.db, `weeklyTracker/${weekKey}`), weekData)
+            .then(() => { setSyncStatus("已同步 ✓"); setTimeout(() => setSyncStatus(""), 2000); })
+            .catch(() => setSyncStatus("儲存失敗"));
+        }, 1500);
+      }, [weekData]);
 
       function toggleTask(dayKey, taskId) {
         setWeekData(p => ({ ...p, [dayKey]: { ...p[dayKey], tasks: p[dayKey].tasks.map(t => t.id===taskId ? {...t,done:!t.done} : t) } }));
@@ -112,7 +158,7 @@
 
       const getProgress = (dayKey) => {
         if (!weekData||!weekData[dayKey]) return {done:0,total:0};
-        const t = weekData[dayKey].tasks;
+        const t = weekData[dayKey].tasks || [];
         return { done:t.filter(x=>x.done).length, total:t.length };
       };
       const weekProgress = (() => {
@@ -121,27 +167,31 @@
         DAYS.filter(d=>!d.rest).forEach(d=>{ const p=getProgress(d.key); done+=p.done; total+=p.total; });
         return {done,total};
       })();
-      const weekPct = weekProgress.total ? Math.round(weekProgress.done/weekProgress.total*100) : 0;
-
+      const weekPct     = weekProgress.total ? Math.round(weekProgress.done/weekProgress.total*100) : 0;
       const monday      = getMondayOfWeek(weekKey);
       const sunday      = new Date(monday); sunday.setDate(monday.getDate()+6);
       const fmt         = (d) => `${d.getMonth()+1}/${d.getDate()}`;
       const todayDayKey = JS_DAY_TO_KEY[new Date().getDay()];
       const isCurrWeek  = weekKey === currentWeekKey();
 
-      if (loading) return (
-        <div style={{display:"flex",alignItems:"center",justifyContent:"center",height:"100vh",background:"#F8FAFC"}}>
-          <div style={{color:"#94A3B8",fontSize:14}}>載入中...</div>
+      if (!weekData) return (
+        <div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",height:"100vh",background:"#F8FAFC",gap:12}}>
+          <div style={{fontSize:24}}>📚</div>
+          <div style={{color:"#6366F1",fontSize:14,fontWeight:600}}>連接 Firebase...</div>
+          <div style={{color:"#94A3B8",fontSize:12}}>正在載入你的備考資料</div>
         </div>
       );
 
       return (
-        <div style={{background:"#F8FAFC",minHeight:"100vh",fontFamily:"-apple-system,'Helvetica Neue',Arial,sans-serif"}}>
+        <div style={{background:"#F8FAFC",minHeight:"100vh"}}>
+          {/* Top bar */}
           <div style={{background:"#1E293B",padding:"0 20px"}}>
             <div style={{maxWidth:720,margin:"0 auto",padding:"16px 0",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
               <div>
                 <div style={{color:"white",fontWeight:700,fontSize:16}}>📚 備考週計畫</div>
-                <div style={{color:"#94A3B8",fontSize:12,marginTop:2}}>土木技師 × 研究所</div>
+                <div style={{color: syncStatus.includes("✓") ? "#34D399" : syncStatus.includes("失敗") ? "#F87171" : "#94A3B8", fontSize:11,marginTop:2}}>
+                  {syncStatus || "土木技師 × 研究所"}
+                </div>
               </div>
               <div style={{display:"flex",alignItems:"center",gap:8}}>
                 <button onClick={()=>changeWeek(-1)} style={{background:"#334155",border:"none",color:"#CBD5E1",borderRadius:6,padding:"6px 10px",cursor:"pointer",fontSize:13}}>←</button>
@@ -155,6 +205,7 @@
           </div>
 
           <div style={{maxWidth:720,margin:"0 auto",padding:"16px 20px"}}>
+            {/* 本週進度 */}
             <div style={{background:"white",borderRadius:12,padding:"16px 20px",marginBottom:16,boxShadow:"0 1px 3px rgba(0,0,0,0.06)",border:"1px solid #E2E8F0"}}>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
                 <span style={{fontSize:13,fontWeight:600,color:"#374151"}}>本週完成率</span>
@@ -165,7 +216,7 @@
               <div style={{background:"#F1F5F9",borderRadius:999,height:8,overflow:"hidden"}}>
                 <div style={{height:"100%",borderRadius:999,background:weekPct>=80?"#10B981":weekPct>=50?"#F59E0B":"#6366F1",width:`${weekPct}%`,transition:"width 0.4s ease"}}/>
               </div>
-              <div style={{display:"flex",gap:6,marginTop:10,justifyContent:"space-between"}}>
+              <div style={{display:"flex",gap:6,marginTop:10}}>
                 {DAYS.map(day => {
                   const p=getProgress(day.key); const pct=p.total?p.done/p.total:0;
                   const isToday=isCurrWeek&&day.key===todayDayKey;
@@ -179,8 +230,10 @@
               </div>
             </div>
 
+            {/* 每日卡片 */}
             {DAYS.map(day => {
-              const data=weekData[day.key]; const prog=getProgress(day.key);
+              const data = weekData[day.key] || createDefaultDay(day.key);
+              const prog=getProgress(day.key);
               const pct=prog.total?Math.round(prog.done/prog.total*100):0;
               const isRest=day.rest; const isToday=isCurrWeek&&day.key===todayDayKey;
               const isExpanded=expandedDay===day.key||isToday; const isAdding=addingTo===day.key;
@@ -216,7 +269,7 @@
                         placeholder="今日主修科目（選填）"
                         style={{width:"100%",border:"1px solid #E2E8F0",borderRadius:8,padding:"8px 12px",fontSize:13,color:"#374151",marginTop:12,marginBottom:12,outline:"none",boxSizing:"border-box",background:"#F8FAFC"}}
                       />
-                      {data.tasks.map(task => {
+                      {(data.tasks||[]).map(task => {
                         const ts=TAG_COLORS[task.tag]||TAG_COLORS["自訂"];
                         return (
                           <div key={task.id} style={{display:"flex",alignItems:"center",gap:10,padding:"8px 0",borderBottom:"1px solid #F8FAFC"}}>
@@ -259,7 +312,7 @@
             })}
 
             <div style={{textAlign:"center",padding:"12px 0 20px"}}>
-              <p style={{fontSize:11,color:"#CBD5E1",margin:0}}>進度自動儲存 · 每週記錄獨立保存</p>
+              <p style={{fontSize:11,color:"#CBD5E1",margin:0}}>資料即時同步至 Firebase · 電腦手機共用</p>
               {!isCurrWeek&&(
                 <button onClick={()=>setWeekKey(currentWeekKey())} style={{marginTop:8,background:"none",border:"1px solid #E2E8F0",borderRadius:6,padding:"4px 12px",cursor:"pointer",fontSize:12,color:"#6B7280"}}>
                   回到本週
